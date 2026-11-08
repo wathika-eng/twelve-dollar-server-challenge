@@ -486,10 +486,12 @@ hval hpbi_sha1(hval s, hval raw_output);  /* real SHA-1; raw=true -> 20 bytes */
 
 /* sockets (see hphp_std.c) — handles are integers, non-blocking by default */
 hval hpbi_stream_socket_server(hval addr);       /* "tcp://host:port" */
+hval hpbi_stream_socket_server_reuseport(hval addr); /* SO_REUSEPORT listener */
 hval hpbi_stream_socket_client(hval addr);
 hval hpbi_stream_socket_accept(hval srv);
 hval hpbi_stream_set_blocking(hval s, hval block);
 hval hpbi_stream_set_nodelay(hval s);
+hval hpbi_stream_set_socket_buffers(hval s, hval recv_bytes, hval send_bytes);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_recv_release(hval s);
 hval hpbi_stream_send(hval s, hval data);
@@ -1073,6 +1075,7 @@ hval hpbi_live_bytes(void);
 hval hpbi_live_allocs(void);
 hval hpbi_arr_clear(hval a);
 hval hpbi_arr_free(hval a);
+hval hpbi_object_free(hval obj);
 hval hpbi_bt_root(hval db, hval name, hval is_index);
 hval hpbi_bt_open(hval db, hval name, hval is_index);
 hval hpbi_bt_close(hval h);
@@ -1112,6 +1115,7 @@ hval hpbi_sqlite_open(hval path);
 hval hpbi_sqlite_open_vfs(hval path, hval vfs);
 hval hpbi_sqlite_bg_checkpoint_start(hval db, hval path, hval frames, hval hold_ms);
 hval hpbi_sqlite_bg_checkpoint_hold(hval db);
+hval hpbi_sqlite_bg_checkpoint_tick(hval db);
 hval hpbi_sqlite_bg_checkpoint_active(hval db);
 hval hpbi_sqlite_close(hval db);
 hval hpbi_sqlite_exec(hval db, hval sql);
@@ -1127,6 +1131,8 @@ hval hpbi_sqlite_column_int(hval stmt, hval col);
 hval hpbi_sqlite_changes(hval db);
 hval hpbi_sqlite_last_insert_rowid(hval db);
 hval hpbi_sqlite_errmsg(hval db);
+hval hpbi_sqlite_extended_errcode(hval db);
+hval hpbi_sqlite_is_lock_error(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
 /* ---- typed builtin fast paths (see hphp_std.c) ---- */

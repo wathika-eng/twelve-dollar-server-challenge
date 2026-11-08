@@ -25,6 +25,10 @@ the app itself.
   post and author and escapes their payload bytes straight into the response
   buffer. `/posts/:id` uses the same cursors and an index range scan for its
   count. Records are decoded in place without row objects or per-field strings.
+  The feed's `posts` table record is decoded inline in typed HolyPHP, matching
+  the fixed `schema.sql` layout; invalid or overflow records fall back to the
+  generic B-tree decoder. Set `HPHP_FEED_RAW=0` to use the generic decoder for
+  every row.
   This is a generic driver binding (`bt_root` / `bt_open` / `bt_last` / …),
   not challenge logic, and it falls back to the SQL path when the pinned
   SQLite could not be built (the binding is a weak reference).
@@ -99,12 +103,19 @@ allocation-stable for a long-running server. All of this is generic:
   `HPHP_DIRECT=1` (default in `start.sh`), each ring registers a sparse
   65535-slot file table (`IORING_REGISTER_FILES2` +
   `IORING_RSRC_REGISTER_SPARSE`, clamped to `RLIMIT_NOFILE`) and accepts
-  straight into it with a bounded queue of 512 single-shot accepts per ring
-  (matching the Rust leader's in-flight accept depth). Connections then use multishot
-  recv over a provided-buffer ring (one SQE for the connection's lifetime,
-  data copied into the connection's own buffer, buffer id returned at once),
-  fixed-file sends, and ring CLOSE. Direct handles live above every real fd,
-  so the 65535 fd limit no longer caps held connections. `HPHP_RINGS`
+  straight into it from eight `SO_REUSEPORT` listeners. Their independent
+  kernel accept queues spread connection bursts; the generic runtime keeps an
+  accept armed on the listener that completed and fills a bounded queue of 512
+  single-shot accepts per active ring. If reuseport is unavailable, the server
+  falls back to one ordinary listener. Connections then use multishot recv over
+  a provided-buffer ring (one SQE for the connection's lifetime). By default,
+  receive data is copied into per-connection state and the provided buffer is
+  returned immediately. With opt-in `HPHP_RECV_ZEROCOPY=1`, a complete request
+  that fits in one selected buffer is parsed in place; partial or multi-buffer
+  requests are promoted to an owned string before the buffer is returned. Both
+  modes use fixed-file sends and ring CLOSE.
+  Direct handles live above every real fd, so the 65535 fd limit no longer caps
+  held connections. `HPHP_RINGS`
   (default 6) creates six rings, each with its own sparse table and buffer
   ring: ~393k direct slots at the default. A registered eventfd per ring keeps CQ wakeups
   reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a
@@ -122,9 +133,13 @@ same way epoll and the SQLite binding are.
 - `build-essential`, `curl`, `unzip`, `libsqlite3-dev`.
 - `build.sh` builds the pinned SQLite amalgamation (3.46.1 by default,
   sha256-checked) with
-  `-DSQLITE_THREADSAFE=1`: the generic in-process checkpoint worker can use a second SQLite connection;
-  the request connection remains NOMUTEX and event-loop-owned. If the download or
-  the build fails, it falls back to the system library, so an offline box still
+  `-DSQLITE_THREADSAFE=2` with memory-status tracking disabled and SQLite C APIs
+  that the runtime does not expose omitted. Both request and checkpoint
+  connections use NOMUTEX and are owned by separate threads; `sqlite3_initialize`
+  is called explicitly. SQL syntax and default pragmas are unchanged. Set
+  `HPHP_SQLITE_DEFINES` to replace the default define list or
+  `HPHP_SQLITE_THREADSAFE` to choose another thread mode. If the download or
+  build fails, it falls back to the system library, so an offline box still
   produces a working server. JSON1 and `INSERT … RETURNING` need SQLite ≥ 3.38.
 
 ## Run
@@ -460,3 +475,24 @@ functional suites both passed 42/42. The 800-VU, 30-second A/B/B/A run measured
 had zero HTTP failures. The candidate did not improve the results and the
 sequence drifted, so the prefetch change was removed. This WSL test does not
 justify a speed claim or box estimate.
+
+#### Listener-group accept rearm (local WSL, 2026-11-04)
+
+The direct runtime now rearms an accept on the same `SO_REUSEPORT` listener
+after each completion. Without that, the bounded ring-wide accept pool could
+temporarily leave a busy listener with no outstanding accept while the ring
+waited on other listeners. The challenge suite passed 42/42 in both Direct
+and Classic modes. A staged synthetic run then held 280,000 concurrent
+connections for over five minutes; all 280,000 `/health` requests returned
+HTTP 200, and all connections later closed cleanly. Five direct rings were
+active, with no parked SQEs or accept-arm failures. WSL's original
+`nf_conntrack_max` of 262,144 blocked the fourth 70,000-connection batch, so
+the local limit was temporarily raised to 1,048,576 for this run and restored
+afterward. This is a local idle-connection capacity and stability check, not
+the challenge's box benchmark or a throughput result.
+
+#### Typed HolyPHP feed record decoder A/B (WSL, 2026-11-07)
+
+The fixed `posts` SQLite record can be decoded inline in typed HolyPHP, matching the top submission's single-pass record decoder. `start.sh` enables this path; `HPHP_FEED_RAW=0` retains the generic `bt_cols` decoder. The inline path checks header and payload bounds and falls back to the generic decoder if a record does not fit.
+
+On the real seed database, same-binary A/B/B/A at 800 VUs (30% likes, 5% posts; 5 s ramp + 15 s active) had zero HTTP failures. Generic decode averaged 17,523 req/s, p95 41.64 ms, p99 57.43 ms, and 16.72 µs process CPU/request. Inline decode averaged 17,824 req/s, p95 39.73 ms, p99 52.16 ms, and 16.48 µs CPU/request. These are WSL diagnostics, not box results; run-to-run warm-up drift remains visible.
